@@ -51,11 +51,30 @@ client.on('interactionCreate', async interaction => {
 
         // Step 2: Check official Roblox presence API
         let status = 0; // default offline
+        let rootPlaceId = null;
+        let gameServerLink = "";
         try {
             const presenceRes = await axios.post('https://presence.roblox.com/v1/presence/users', { userIds: [userId] });
             if (presenceRes.data.userPresences && presenceRes.data.userPresences.length > 0) {
-                // The correct field is userPresenceType
-                status = presenceRes.data.userPresences[0].userPresenceType ?? 0;
+                const presence = presenceRes.data.userPresences[0];
+                status = presence.userPresenceType ?? 0;
+                rootPlaceId = presence.rootPlaceId ?? null;
+
+                // Step 2a: If in game, try to get public server link
+                if (status === 2 && rootPlaceId) {
+                    try {
+                        const serversRes = await axios.get(`https://games.roblox.com/v1/games/${rootPlaceId}/servers/Public?sortOrder=Asc&limit=100`);
+                        const server = serversRes.data.data.find(s => s.playing === 1 && s.id); // check if player is in any public server
+                        if (server) {
+                            gameServerLink = `\n🔗 Join public server: https://www.roblox.com/games/${rootPlaceId}/${server.id}`;
+                        } else {
+                            gameServerLink = `\n🔗 Game link: https://www.roblox.com/games/${rootPlaceId}`;
+                        }
+                    } catch (err) {
+                        console.log("Failed to get server info, showing general game link");
+                        gameServerLink = `\n🔗 Game link: https://www.roblox.com/games/${rootPlaceId}`;
+                    }
+                }
             }
         } catch (err) {
             console.log("Presence API failed, assuming offline", err.message);
@@ -68,7 +87,7 @@ client.on('interactionCreate', async interaction => {
         else if (status === 1) message = "🟢 Online (not in game/studio)";
         else message = "🔴 Offline or not detectable";
 
-        await interaction.reply(`${username} is currently: ${message}`);
+        await interaction.reply(`${username} is currently: ${message}${gameServerLink}`);
     } catch (err) {
         console.error(err);
         await interaction.reply("Error checking status.");
