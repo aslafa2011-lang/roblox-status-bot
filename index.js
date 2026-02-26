@@ -38,6 +38,33 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
 }
 
+// ===== FIXED GAME NAME FUNCTION =====
+async function getGameName(placeId) {
+    try {
+        // Convert placeId -> universeId
+        const universeRes = await axios.get(
+            `https://apis.roblox.com/universes/v1/places/${placeId}/universe`
+        );
+
+        const universeId = universeRes.data.universeId;
+        if (!universeId) return "Unknown Game";
+
+        // Get game info using universeId
+        const gameRes = await axios.get(
+            `https://games.roblox.com/v1/games?universeIds=${universeId}`
+        );
+
+        if (gameRes.data.data.length > 0) {
+            return gameRes.data.data[0].name;
+        }
+
+    } catch (err) {
+        console.log("Game name fetch error:", err.message);
+    }
+
+    return "Unknown Game";
+}
+
 // ===== Slash Commands =====
 const commands = [
     new SlashCommandBuilder()
@@ -76,17 +103,6 @@ const rest = new REST({ version: '10' }).setToken(token);
         console.log("Commands registered.");
     } catch (e) { console.error(e); }
 })();
-
-// ===== Helper: Get Game Name =====
-async function getGameName(placeId) {
-    try {
-        const res = await axios.get(`https://games.roblox.com/v1/games?universeIds=${placeId}`);
-        if (res.data.data.length > 0) {
-            return res.data.data[0].name;
-        }
-    } catch (err) {}
-    return "Unknown Game";
-}
 
 // ===== TRACK LOOP (15 seconds) =====
 setInterval(async () => {
@@ -135,7 +151,7 @@ setInterval(async () => {
                     .setTimestamp();
             }
 
-            // GAME CHANGE (Game A -> Game B)
+            // GAME CHANGE
             if (prev === 2 && curr === 2 && presence.rootPlaceId !== data.lastPlaceId) {
 
                 let gameName = await getGameName(presence.rootPlaceId);
@@ -149,7 +165,7 @@ setInterval(async () => {
                     .setTimestamp();
             }
 
-            // IN GAME -> OFFLINE (Optional)
+            // IN GAME -> OFFLINE
             if (prev === 2 && curr === 0) {
                 embed = new EmbedBuilder()
                     .setTitle("🔴 Player Offline")
@@ -217,7 +233,6 @@ client.on('interactionCreate', async interaction => {
         const userId = userRes.data.data[0].id.toString();
 
         if (interaction.commandName === 'track') {
-
             if (!trackedUsers.has(userId)) {
                 trackedUsers.set(userId, {
                     username,
@@ -232,7 +247,6 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (interaction.commandName === 'untrack') {
-
             if (!trackedUsers.has(userId))
                 return interaction.reply("Not tracking that user.");
 
