@@ -39,35 +39,39 @@ function saveData() {
 }
 
 // ===== FIXED GAME NAME FUNCTION =====
-async function getGameName(placeId) {
+async function getGameName(presence) {
     try {
-        // Step 1: Convert placeId → universeId
-        const universeRes = await axios.get(
-            `https://apis.roblox.com/universes/v1/places/${placeId}/universe`
-        );
-        const universeId = universeRes.data.universeId;
+        // Step 1: Use universeId from presence directly if available!
+        let universeId = presence.universeId;
 
-        if (!universeId) {
-            console.log(`Universe not found for placeId: ${placeId}`);
-            return "Unknown Game";
+        // Step 2: If not, convert placeId → universeId
+        if (!universeId && presence.rootPlaceId) {
+            const universeRes = await axios.get(
+                `https://apis.roblox.com/universes/v1/places/${presence.rootPlaceId}/universe`
+            );
+            universeId = universeRes.data.universeId;
         }
 
-        // Step 2: Get game info using universeId
-        const gameRes = await axios.get(
-            `https://games.roblox.com/v1/games?universeIds=${universeId}`
-        );
+        // Step 3: Get game info using universeId
+        if (universeId) {
+            const gameRes = await axios.get(
+                `https://games.roblox.com/v1/games?universeIds=${universeId}`
+            );
 
-        if (gameRes.data.data.length > 0) {
-            return gameRes.data.data[0].name;
-        } else {
-            console.log(`Game info not found for universeId: ${universeId}`);
-            return "Unknown Game";
+            if (gameRes.data.data.length > 0) {
+                return gameRes.data.data[0].name;
+            }
         }
-
     } catch (err) {
-        console.log(`Error fetching game name for placeId ${placeId}:`, err.message);
-        return "Unknown Game";
+        console.log(`Error fetching game name:`, err.message);
     }
+    
+    // Step 4: Fallback to lastLocation if API fails
+    if (presence.lastLocation && presence.lastLocation.trim() !== "") {
+        return presence.lastLocation;
+    }
+
+    return "Unknown Game";
 }
 
 // ===== Slash Commands =====
@@ -144,8 +148,14 @@ setInterval(async () => {
                 let gameLink = "";
 
                 if (presence.rootPlaceId) {
-                    gameName = await getGameName(presence.rootPlaceId);
-                    gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}`;
+                    gameName = await getGameName(presence); // Fixed game name logic
+                    
+                    // Added jobId to create a direct server join link
+                    if (presence.gameId) {
+                        gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}?jobId=${presence.gameId}`;
+                    } else {
+                        gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}`;
+                    }
                 }
 
                 embed = new EmbedBuilder()
@@ -159,14 +169,25 @@ setInterval(async () => {
             // GAME CHANGE
             if (prev === 2 && curr === 2 && presence.rootPlaceId !== data.lastPlaceId) {
 
-                let gameName = await getGameName(presence.rootPlaceId);
-                let gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}`;
+                let gameName = "Unknown Game";
+                let gameLink = "";
+
+                if (presence.rootPlaceId) {
+                    gameName = await getGameName(presence); // Fixed game name logic
+                    
+                    // Added jobId to create a direct server join link
+                    if (presence.gameId) {
+                        gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}?jobId=${presence.gameId}`;
+                    } else {
+                        gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}`;
+                    }
+                }
 
                 embed = new EmbedBuilder()
                     .setTitle("🔄 Game Changed")
                     .setDescription(`**${data.username}** switched to **${gameName}**`)
                     .setColor(0xff9900)
-                    .addFields({ name: "Join Game", value: gameLink })
+                    .addFields({ name: "Join Game", value: gameLink || "Unavailable" })
                     .setTimestamp();
             }
 
@@ -276,9 +297,15 @@ client.on('interactionCreate', async interaction => {
                 const status = presence.userPresenceType;
 
                 if (status === 2) {
-                    let gameName = await getGameName(presence.rootPlaceId);
-                    message = `🎮 In Game: ${gameName}`;
-                    link = `\nhttps://www.roblox.com/games/${presence.rootPlaceId}`;
+                    let gameName = await getGameName(presence); // Fixed game name logic
+                    message = `🎮 In Game: **${gameName}**`;
+                    
+                    // Added jobId to create a direct server join link
+                    if (presence.gameId && presence.rootPlaceId) {
+                        link = `\n🔗 **Join Server:** https://www.roblox.com/games/${presence.rootPlaceId}?jobId=${presence.gameId}`;
+                    } else if (presence.rootPlaceId) {
+                        link = `\n🔗 **Game Link:** https://www.roblox.com/games/${presence.rootPlaceId}`;
+                    }
                 }
                 else if (status === 3) message = "🛠️ In Studio";
                 else if (status === 1) message = "🟢 Online";
