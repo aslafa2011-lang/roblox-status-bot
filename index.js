@@ -41,28 +41,33 @@ function saveData() {
 // ===== FIXED GAME NAME FUNCTION =====
 async function getGameName(placeId) {
     try {
-        // Convert placeId -> universeId
+        // Step 1: Convert placeId → universeId
         const universeRes = await axios.get(
             `https://apis.roblox.com/universes/v1/places/${placeId}/universe`
         );
-
         const universeId = universeRes.data.universeId;
-        if (!universeId) return "Unknown Game";
 
-        // Get game info using universeId
+        if (!universeId) {
+            console.log(`Universe not found for placeId: ${placeId}`);
+            return "Unknown Game";
+        }
+
+        // Step 2: Get game info using universeId
         const gameRes = await axios.get(
             `https://games.roblox.com/v1/games?universeIds=${universeId}`
         );
 
         if (gameRes.data.data.length > 0) {
             return gameRes.data.data[0].name;
+        } else {
+            console.log(`Game info not found for universeId: ${universeId}`);
+            return "Unknown Game";
         }
 
     } catch (err) {
-        console.log("Game name fetch error:", err.message);
+        console.log(`Error fetching game name for placeId ${placeId}:`, err.message);
+        return "Unknown Game";
     }
-
-    return "Unknown Game";
 }
 
 // ===== Slash Commands =====
