@@ -2,10 +2,7 @@
 const express = require('express');
 const app = express();
 app.get("/", (req, res) => res.send("Bot is alive!"));
-const listener = app.listen(process.env.PORT || 3000, () => {
-  const addr = listener.address();
-  console.log('Bot is listening on port ' + (addr ? addr.port : 'unknown'));
-});
+app.listen(process.env.PORT || 3000);
 
 // ===== Discord + Roblox bot =====
 const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
@@ -16,15 +13,21 @@ const clientId = process.env.CLIENT_ID;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// Memory storage for tracked users (Resets if bot restarts)
+let trackedUsers = new Map(); 
+
 // ===== Slash command registration =====
 const commands = [
     new SlashCommandBuilder()
         .setName('status')
         .setDescription('Check Roblox player status')
-        .addStringOption(option =>
-            option.setName('username')
-                .setDescription('Roblox username')
-                .setRequired(true))
+        .addStringOption(option => 
+            option.setName('username').setDescription('Roblox username').setRequired(true)),
+    new SlashCommandBuilder()
+        .setName('track')
+        .setDescription('Get notified when a player’s status changes')
+        .addStringOption(option => 
+            option.setName('username').setDescription('Roblox username').setRequired(true))
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(token);
@@ -32,65 +35,99 @@ const rest = new REST({ version: '10' }).setToken(token);
 (async () => {
     try {
         await rest.put(Routes.applicationCommands(clientId), { body: commands });
-        console.log('Slash command registered.');
+        console.log('Commands registered successfully.');
     } catch (e) { console.error(e); }
 })();
 
-// ===== Handle slash command =====
+// ===== Background Tracker Loop (Every 60 seconds) =====
+setInterval(async () => {
+    if (trackedUsers.size === 0) return;
+
+    for (const [userId, data] of trackedUsers.entries()) {
+        try {
+            const presenceRes = await axios.post('https://presence.roblox.com/v1/presence/users', { userIds: [userId] });
+            const presence = presenceRes.data.userPresences[0];
+
+            if (presence && presence.userPresenceType !== data.lastStatus) {
+                let statusText = "";
+                let gameLink = "";
+
+                if (presence.userPresenceType === 2) {
+                    statusText = "🎮 **In Game**";
+                    if (presence.rootPlaceId) {
+                        gameLink = `\n🔗 **Game Link:** https://www.roblox.com/games/${presence.rootPlaceId}`;
+                    }
+                } else if (presence.userPresenceType === 1) {
+                    statusText = "🟢 **Online**";
+                } else if (presence.userPresenceType === 0) {
+                    statusText = "🔴 **Offline**";
+                }
+
+                if (statusText !== "") {
+                    data.channels.forEach(async (channelId) => {
+                        const channel = await client.channels.fetch(channelId);
+                        if (channel) channel.send(`🔔 **Track Update:** **${data.username}** is now ${statusText}${gameLink}`);
+                    });
+                }
+
+                // Update the last known status
+                trackedUsers.set(userId, { ...data, lastStatus: presence.userPresenceType });
+            }
+        } catch (err) {
+            console.error(`Tracking error for ${userId}:`, err.message);
+        }
+    }
+}, 60000);
+
+// ===== Handle interactions =====
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== 'status') return;
 
     const username = interaction.options.getString('username');
 
     try {
-        // Step 1: Get user ID from username
+        // Step 1: Get user ID
         const userRes = await axios.post('https://users.roblox.com/v1/usernames/users', { usernames: [username], excludeBannedUsers: true });
         if (!userRes.data.data.length) return interaction.reply("User not found.");
         const userId = userRes.data.data[0].id;
 
-        // Step 2: Check official Roblox presence API
-        let status = 0; // default offline
-        let rootPlaceId = null;
-        let gameServerLink = "";
-        try {
-            const presenceRes = await axios.post('https://presence.roblox.com/v1/presence/users', { userIds: [userId] });
-            if (presenceRes.data.userPresences && presenceRes.data.userPresences.length > 0) {
-                const presence = presenceRes.data.userPresences[0];
-                status = presence.userPresenceType ?? 0;
-                rootPlaceId = presence.rootPlaceId ?? null;
-
-                // Step 2a: If in game, try to get public server link
-                if (status === 2 && rootPlaceId) {
-                    try {
-                        const serversRes = await axios.get(`https://games.roblox.com/v1/games/${rootPlaceId}/servers/Public?sortOrder=Asc&limit=100`);
-                        const server = serversRes.data.data.find(s => s.playing === 1 && s.id); // check if player is in any public server
-                        if (server) {
-                            gameServerLink = `\n🔗 Join public server: https://www.roblox.com/games/${rootPlaceId}/${server.id}`;
-                        } else {
-                            gameServerLink = `\n🔗 Game link: https://www.roblox.com/games/${rootPlaceId}`;
-                        }
-                    } catch (err) {
-                        console.log("Failed to get server info, showing general game link");
-                        gameServerLink = `\n🔗 Game link: https://www.roblox.com/games/${rootPlaceId}`;
-                    }
-                }
+        // Command: /track
+        if (interaction.commandName === 'track') {
+            if (!trackedUsers.has(userId)) {
+                trackedUsers.set(userId, { username: username, lastStatus: null, channels: [interaction.channelId] });
+            } else {
+                const existing = trackedUsers.get(userId);
+                if (!existing.channels.includes(interaction.channelId)) existing.channels.push(interaction.channelId);
             }
-        } catch (err) {
-            console.log("Presence API failed, assuming offline", err.message);
+            return interaction.reply(`✅ Now tracking **${username}**. I will notify this channel when their status changes.`);
         }
 
-        // Step 3: Prepare message
-        let message;
-        if (status === 2) message = "🎮 In Game";
-        else if (status === 3) message = "🛠️ In Studio";
-        else if (status === 1) message = "🟢 Online (not in game/studio)";
-        else message = "🔴 Offline or not detectable";
+        // Command: /status
+        if (interaction.commandName === 'status') {
+            const presenceRes = await axios.post('https://presence.roblox.com/v1/presence/users', { userIds: [userId] });
+            const presence = presenceRes.data.userPresences[0];
 
-        await interaction.reply(`${username} is currently: ${message}${gameServerLink}`);
+            let message = "🔴 Offline or not detectable";
+            let gameLink = "";
+
+            if (presence) {
+                const status = presence.userPresenceType;
+                if (status === 2) {
+                    message = "🎮 In Game";
+                    if (presence.rootPlaceId) {
+                        gameLink = `\n🔗 **Game Link:** https://www.roblox.com/games/${presence.rootPlaceId}`;
+                    }
+                }
+                else if (status === 3) message = "🛠️ In Studio";
+                else if (status === 1) message = "🟢 Online (not in game)";
+            }
+
+            await interaction.reply(`${username} is currently: ${message}${gameLink}`);
+        }
+
     } catch (err) {
         console.error(err);
-        await interaction.reply("Error checking status.");
+        await interaction.reply("Error processing your request.");
     }
 });
 
