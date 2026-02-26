@@ -38,37 +38,22 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
 }
 
-// ===== FIXED GAME NAME FUNCTION =====
+// ===== IMPROVED GAME NAME FUNCTION =====
 async function getGameName(presence) {
-    try {
-        // Step 1: Use universeId from presence directly if available!
-        let universeId = presence.universeId;
-
-        // Step 2: If not, convert placeId → universeId
-        if (!universeId && presence.rootPlaceId) {
-            const universeRes = await axios.get(
-                `https://apis.roblox.com/universes/v1/places/${presence.rootPlaceId}/universe`
-            );
-            universeId = universeRes.data.universeId;
-        }
-
-        // Step 3: Get game info using universeId
-        if (universeId) {
-            const gameRes = await axios.get(
-                `https://games.roblox.com/v1/games?universeIds=${universeId}`
-            );
-
-            if (gameRes.data.data.length > 0) {
-                return gameRes.data.data[0].name;
-            }
-        }
-    } catch (err) {
-        console.log(`Error fetching game name:`, err.message);
-    }
-    
-    // Step 4: Fallback to lastLocation if API fails
-    if (presence.lastLocation && presence.lastLocation.trim() !== "") {
+    // 1. Most reliable: The Presence API usually gives the name directly in lastLocation
+    if (presence.lastLocation && presence.lastLocation !== "" && presence.lastLocation !== "Website") {
         return presence.lastLocation;
+    }
+
+    // 2. Fallback: Fetch via IDs if lastLocation is missing
+    const placeId = presence.rootPlaceId || presence.placeId;
+    if (placeId) {
+        try {
+            const universeRes = await axios.get(`https://apis.roblox.com/universes/v1/places/${placeId}/universe`);
+            const universeId = universeRes.data.universeId;
+            const gameRes = await axios.get(`https://games.roblox.com/v1/games?universeIds=${universeId}`);
+            if (gameRes.data.data.length > 0) return gameRes.data.data[0].name;
+        } catch (e) {}
     }
 
     return "Unknown Game";
@@ -79,33 +64,24 @@ const commands = [
     new SlashCommandBuilder()
         .setName('track')
         .setDescription('Track a Roblox player')
-        .addStringOption(o =>
-            o.setName('username').setDescription('Roblox username').setRequired(true)),
-
+        .addStringOption(o => o.setName('username').setDescription('Roblox username').setRequired(true)),
     new SlashCommandBuilder()
         .setName('untrack')
         .setDescription('Stop tracking a player')
-        .addStringOption(o =>
-            o.setName('username').setDescription('Roblox username').setRequired(true)),
-
+        .addStringOption(o => o.setName('username').setDescription('Roblox username').setRequired(true)),
     new SlashCommandBuilder()
         .setName('list')
         .setDescription('List tracked users'),
-
     new SlashCommandBuilder()
         .setName('clear')
         .setDescription('Remove ALL tracked users'),
-
     new SlashCommandBuilder()
         .setName('status')
         .setDescription('Check Roblox player status')
-        .addStringOption(o =>
-            o.setName('username').setDescription('Roblox username').setRequired(true))
-
+        .addStringOption(o => o.setName('username').setDescription('Roblox username').setRequired(true))
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(token);
-
 (async () => {
     try {
         await rest.put(Routes.applicationCommands(clientId), { body: commands });
@@ -115,72 +91,43 @@ const rest = new REST({ version: '10' }).setToken(token);
 
 // ===== TRACK LOOP (15 seconds) =====
 setInterval(async () => {
-
     for (const [userId, data] of trackedUsers.entries()) {
-
         try {
-            const presenceRes = await axios.post(
-                'https://presence.roblox.com/v1/presence/users',
-                { userIds: [Number(userId)] }
-            );
-
+            const presenceRes = await axios.post('https://presence.roblox.com/v1/presence/users', { userIds: [Number(userId)] });
             const presence = presenceRes.data.userPresences[0];
             if (!presence) continue;
 
             const prev = data.lastStatus;
             const curr = presence.userPresenceType;
-
             let embed = null;
 
-            // OFFLINE -> ONLINE
-            if ((prev === 0 || prev === null) && curr === 1) {
-                embed = new EmbedBuilder()
-                    .setTitle("🟢 Player Online")
-                    .setDescription(`**${data.username}** is now Online`)
-                    .setColor(0x0099ff)
-                    .setTimestamp();
-            }
-
-            // ONLINE -> IN GAME
-            if (prev === 1 && curr === 2) {
-
-                let gameName = "Unknown Game";
-                let gameLink = "";
-
-                if (presence.rootPlaceId) {
-                    gameName = await getGameName(presence); // Fixed game name logic
-                    
-                    // Added jobId to create a direct server join link
-                    if (presence.gameId) {
-                        gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}?jobId=${presence.gameId}`;
-                    } else {
-                        gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}`;
-                    }
+            // ONLINE -> IN GAME (or OFFLINE -> IN GAME)
+            if ((prev === 1 || prev === 0 || prev === null) && curr === 2) {
+                const gameName = await getGameName(presence);
+                const placeId = presence.rootPlaceId || presence.placeId;
+                let gameLink = placeId ? `https://www.roblox.com/games/${placeId}` : "";
+                
+                // Add specific Server Link if JobId (gameId) is available
+                if (placeId && presence.gameId) {
+                    gameLink = `https://www.roblox.com/games/${placeId}?jobId=${presence.gameId}`;
                 }
 
                 embed = new EmbedBuilder()
                     .setTitle("🎮 Player Joined Game")
                     .setDescription(`**${data.username}** joined **${gameName}**`)
                     .setColor(0x00ff00)
-                    .addFields({ name: "Join Game", value: gameLink || "Unavailable" })
+                    .addFields({ name: "Join Game", value: gameLink || "Unavailable (Privacy Settings)" })
                     .setTimestamp();
             }
 
-            // GAME CHANGE
-            if (prev === 2 && curr === 2 && presence.rootPlaceId !== data.lastPlaceId) {
-
-                let gameName = "Unknown Game";
-                let gameLink = "";
-
-                if (presence.rootPlaceId) {
-                    gameName = await getGameName(presence); // Fixed game name logic
-                    
-                    // Added jobId to create a direct server join link
-                    if (presence.gameId) {
-                        gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}?jobId=${presence.gameId}`;
-                    } else {
-                        gameLink = `https://www.roblox.com/games/${presence.rootPlaceId}`;
-                    }
+            // GAME CHANGE (Fixed to check both ID types)
+            else if (prev === 2 && curr === 2 && (presence.rootPlaceId || presence.placeId) !== data.lastPlaceId) {
+                const gameName = await getGameName(presence);
+                const placeId = presence.rootPlaceId || presence.placeId;
+                let gameLink = placeId ? `https://www.roblox.com/games/${placeId}` : "";
+                
+                if (placeId && presence.gameId) {
+                    gameLink = `https://www.roblox.com/games/${placeId}?jobId=${presence.gameId}`;
                 }
 
                 embed = new EmbedBuilder()
@@ -192,7 +139,7 @@ setInterval(async () => {
             }
 
             // IN GAME -> OFFLINE
-            if (prev === 2 && curr === 0) {
+            else if (prev === 2 && curr === 0) {
                 embed = new EmbedBuilder()
                     .setTitle("🔴 Player Offline")
                     .setDescription(`**${data.username}** went Offline`)
@@ -200,43 +147,41 @@ setInterval(async () => {
                     .setTimestamp();
             }
 
+            // OFFLINE -> ONLINE
+            else if ((prev === 0 || prev === null) && curr === 1) {
+                embed = new EmbedBuilder()
+                    .setTitle("🟢 Player Online")
+                    .setDescription(`**${data.username}** is now Online`)
+                    .setColor(0x0099ff)
+                    .setTimestamp();
+            }
+
             if (embed) {
                 for (const channelId of data.channels) {
-                    const channel = await client.channels.fetch(channelId);
-                    if (channel) channel.send({ embeds: [embed] });
+                    try {
+                        const channel = await client.channels.fetch(channelId);
+                        if (channel) channel.send({ embeds: [embed] });
+                    } catch (e) {}
                 }
             }
 
             trackedUsers.set(userId, {
                 ...data,
                 lastStatus: curr,
-                lastPlaceId: presence.rootPlaceId || null
+                lastPlaceId: presence.rootPlaceId || presence.placeId || null
             });
-
             saveData();
-
-        } catch (err) {
-            console.error("Tracking error:", err.message);
-        }
+        } catch (err) { console.error("Tracking error:", err.message); }
     }
-
 }, 15000);
 
 // ===== Handle Commands =====
 client.on('interactionCreate', async interaction => {
-
     if (!interaction.isChatInputCommand()) return;
-
     try {
-
         if (interaction.commandName === 'list') {
-            if (trackedUsers.size === 0)
-                return interaction.reply("No users are being tracked.");
-
-            const list = [...trackedUsers.values()]
-                .map(u => `• ${u.username}`)
-                .join("\n");
-
+            if (trackedUsers.size === 0) return interaction.reply("No users are being tracked.");
+            const list = [...trackedUsers.values()].map(u => `• ${u.username}`).join("\n");
             return interaction.reply(`📋 **Tracked Users:**\n${list}`);
         }
 
@@ -247,78 +192,50 @@ client.on('interactionCreate', async interaction => {
         }
 
         const username = interaction.options.getString('username');
-
-        const userRes = await axios.post(
-            'https://users.roblox.com/v1/usernames/users',
-            { usernames: [username], excludeBannedUsers: true }
-        );
-
-        if (!userRes.data.data.length)
-            return interaction.reply("User not found.");
-
+        const userRes = await axios.post('https://users.roblox.com/v1/usernames/users', { usernames: [username], excludeBannedUsers: true });
+        if (!userRes.data.data.length) return interaction.reply("User not found.");
         const userId = userRes.data.data[0].id.toString();
 
         if (interaction.commandName === 'track') {
             if (!trackedUsers.has(userId)) {
-                trackedUsers.set(userId, {
-                    username,
-                    lastStatus: null,
-                    lastPlaceId: null,
-                    channels: [interaction.channelId]
-                });
+                trackedUsers.set(userId, { username, lastStatus: null, lastPlaceId: null, channels: [interaction.channelId] });
             }
-
             saveData();
             return interaction.reply(`✅ Now tracking **${username}**.`);
         }
 
         if (interaction.commandName === 'untrack') {
-            if (!trackedUsers.has(userId))
-                return interaction.reply("Not tracking that user.");
-
+            if (!trackedUsers.has(userId)) return interaction.reply("Not tracking that user.");
             trackedUsers.delete(userId);
             saveData();
             return interaction.reply(`🛑 Stopped tracking **${username}**.`);
         }
 
         if (interaction.commandName === 'status') {
-
-            const presenceRes = await axios.post(
-                'https://presence.roblox.com/v1/presence/users',
-                { userIds: [Number(userId)] }
-            );
-
+            const presenceRes = await axios.post('https://presence.roblox.com/v1/presence/users', { userIds: [Number(userId)] });
             const presence = presenceRes.data.userPresences[0];
-
             let message = "🔴 Offline";
             let link = "";
 
             if (presence) {
                 const status = presence.userPresenceType;
-
                 if (status === 2) {
-                    let gameName = await getGameName(presence); // Fixed game name logic
+                    const gameName = await getGameName(presence);
+                    const placeId = presence.rootPlaceId || presence.placeId;
                     message = `🎮 In Game: **${gameName}**`;
-                    
-                    // Added jobId to create a direct server join link
-                    if (presence.gameId && presence.rootPlaceId) {
-                        link = `\n🔗 **Join Server:** https://www.roblox.com/games/${presence.rootPlaceId}?jobId=${presence.gameId}`;
-                    } else if (presence.rootPlaceId) {
-                        link = `\n🔗 **Game Link:** https://www.roblox.com/games/${presence.rootPlaceId}`;
+                    if (placeId) {
+                        link = presence.gameId ? `\n🔗 **Join Server:** https://www.roblox.com/games/${placeId}?jobId=${presence.gameId}` : `\n🔗 **Game Page:** https://www.roblox.com/games/${placeId}`;
                     }
                 }
                 else if (status === 3) message = "🛠️ In Studio";
                 else if (status === 1) message = "🟢 Online";
             }
-
             return interaction.reply(`${username} is currently: ${message}${link}`);
         }
-
     } catch (err) {
         console.error(err);
         interaction.reply("Error processing request.");
     }
-
 });
 
 client.login(token);
