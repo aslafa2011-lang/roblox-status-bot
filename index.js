@@ -20,8 +20,7 @@ const fs = require('fs');
 const token = process.env.TOKEN;
 const clientId = process.env.CLIENT_ID;
 
-// ===== COOKIE SAFETY CHECK =====
-// Ensures the cookie works whether you pasted it with or without the prefix
+// Format Cookie safely
 const rawCookie = process.env.ROBLOX_COOKIE || "";
 const formattedCookie = rawCookie.includes(".ROBLOSECURITY=") 
     ? rawCookie 
@@ -50,49 +49,41 @@ function saveData() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2));
 }
 
-// ===== IMPROVED GAME NAME FUNCTION =====
+// ===== BULLETPROOF GAME NAME FUNCTION =====
 async function getGameName(presence) {
-    try {
-        let universeId = presence.universeId;
-        const placeId = presence.rootPlaceId || presence.placeId;
+    const placeId = presence.rootPlaceId || presence.placeId;
 
-        // 1. If no universeId is provided natively, convert placeId -> universeId
-        if (!universeId && placeId) {
-            try {
-                const uniRes = await axios.get(
-                    `https://apis.roblox.com/universes/v1/places/${placeId}/universe`,
-                    { headers: robloxHeaders }
-                );
-                universeId = uniRes.data.universeId;
-            } catch (err) {
-                // Fails silently to allow fallback
+    // 1. The Economy API Bypass (Public, no cookie needed, very reliable)
+    if (placeId) {
+        try {
+            const assetRes = await axios.get(`https://economy.roblox.com/v2/assets/${placeId}/details`);
+            if (assetRes.data && assetRes.data.Name) {
+                return assetRes.data.Name;
             }
+        } catch (err) {
+            console.log(`[DEBUG] Economy API failed for PlaceId ${placeId}:`, err.message);
         }
-
-        // 2. Fetch game details using the universeId (Most reliable)
-        if (universeId) {
-            try {
-                const gameRes = await axios.get(
-                    `https://games.roblox.com/v1/games?universeIds=${universeId}`,
-                    { headers: robloxHeaders }
-                );
-                if (gameRes.data.data && gameRes.data.data.length > 0) {
-                    return gameRes.data.data[0].name;
-                }
-            } catch (err) {
-                // Fails silently to allow fallback
-            }
-        }
-
-        // 3. Ultimate Fallback: The text Roblox generates itself
-        if (presence.lastLocation && presence.lastLocation.trim() !== "" && presence.lastLocation !== "Website") {
-            return presence.lastLocation;
-        }
-
-    } catch (e) {
-        console.error("Game fetch error:", e.message);
     }
 
+    // 2. Universe API Fallback (Public, no cookie needed)
+    if (presence.universeId) {
+        try {
+            const gameRes = await axios.get(`https://games.roblox.com/v1/games?universeIds=${presence.universeId}`);
+            if (gameRes.data.data && gameRes.data.data.length > 0) {
+                return gameRes.data.data[0].name;
+            }
+        } catch (err) {
+            console.log(`[DEBUG] Universe API failed:`, err.message);
+        }
+    }
+
+    // 3. Last Location Fallback
+    if (presence.lastLocation && presence.lastLocation.trim() !== "" && presence.lastLocation !== "Website") {
+        return presence.lastLocation;
+    }
+
+    // 4. If all fails, log EXACTLY what Roblox gave us to the console so we know why
+    console.log(`[DEBUG] ALARM! Failed to get game name. Raw presence data from Roblox:`, JSON.stringify(presence, null, 2));
     return "Unknown Game";
 }
 
@@ -101,19 +92,11 @@ const commands = [
     new SlashCommandBuilder()
         .setName('track')
         .setDescription('Track a Roblox player')
-        .addStringOption(o =>
-            o.setName('username')
-             .setDescription('Roblox username')
-             .setRequired(true)
-        ),
+        .addStringOption(o => o.setName('username').setDescription('Roblox username').setRequired(true)),
     new SlashCommandBuilder()
         .setName('untrack')
         .setDescription('Stop tracking a player')
-        .addStringOption(o =>
-            o.setName('username')
-             .setDescription('Roblox username')
-             .setRequired(true)
-        ),
+        .addStringOption(o => o.setName('username').setDescription('Roblox username').setRequired(true)),
     new SlashCommandBuilder()
         .setName('list')
         .setDescription('List tracked users'),
@@ -123,11 +106,7 @@ const commands = [
     new SlashCommandBuilder()
         .setName('status')
         .setDescription('Check Roblox player status')
-        .addStringOption(o =>
-            o.setName('username')
-             .setDescription('Roblox username')
-             .setRequired(true)
-        )
+        .addStringOption(o => o.setName('username').setDescription('Roblox username').setRequired(true))
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(token);
@@ -158,7 +137,6 @@ setInterval(async () => {
             const curr = presence.userPresenceType;
             let embed = null;
 
-            // Define common game info variables
             const placeId = presence.rootPlaceId || presence.placeId;
             let gameName = "Unknown Game";
             let gameLink = "Unavailable (Privacy Settings)";
@@ -179,26 +157,20 @@ setInterval(async () => {
                     .setColor(0x00ff00)
                     .addFields({ name: "Join Game", value: gameLink })
                     .setTimestamp();
-            }
-
-            else if (prev === 2 && curr === 2 && placeId !== data.lastPlaceId) {
+            } else if (prev === 2 && curr === 2 && placeId !== data.lastPlaceId) {
                 embed = new EmbedBuilder()
                     .setTitle("🔄 Game Changed")
                     .setDescription(`**${data.username}** switched to **${gameName}**`)
                     .setColor(0xff9900)
                     .addFields({ name: "Join Game", value: gameLink })
                     .setTimestamp();
-            }
-
-            else if (prev === 2 && curr === 0) {
+            } else if (prev === 2 && curr === 0) {
                 embed = new EmbedBuilder()
                     .setTitle("🔴 Player Offline")
                     .setDescription(`**${data.username}** went Offline`)
                     .setColor(0xff0000)
                     .setTimestamp();
-            }
-
-            else if ((prev === 0 || prev === null) && curr === 1) {
+            } else if ((prev === 0 || prev === null) && curr === 1) {
                 embed = new EmbedBuilder()
                     .setTitle("🟢 Player Online")
                     .setDescription(`**${data.username}** is now Online`)
@@ -257,8 +229,8 @@ client.on('interactionCreate', async interaction => {
 
         const userRes = await axios.post(
             'https://users.roblox.com/v1/usernames/users',
-            { usernames: [username], excludeBannedUsers: true },
-            { headers: robloxHeaders }
+            { usernames: [username], excludeBannedUsers: true }
+            // Intentionally removing auth header here so it doesn't fail if the cookie dies
         );
 
         if (!userRes.data.data.length)
@@ -297,7 +269,6 @@ client.on('interactionCreate', async interaction => {
             );
 
             const presence = presenceRes.data.userPresences[0];
-
             let message = "🔴 Offline";
             let link = "";
 
@@ -325,7 +296,7 @@ client.on('interactionCreate', async interaction => {
 
     } catch (err) {
         console.error(err);
-        interaction.reply("Error processing request.");
+        interaction.reply("Error processing request. See console for details.");
     }
 });
 
