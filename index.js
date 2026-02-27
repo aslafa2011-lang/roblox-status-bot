@@ -48,49 +48,35 @@ function saveData() {
 // ===== IMPROVED GAME NAME FUNCTION =====
 async function getGameName(presence) {
     try {
-        if (
-            presence.lastLocation &&
-            presence.lastLocation !== "" &&
-            presence.lastLocation !== "Website"
-        ) {
-            return presence.lastLocation;
-        }
-
         const universeId = presence.universeId;
+        const placeId = presence.rootPlaceId || presence.placeId;
 
+        // 1. Try Universe API first (most reliable for name)
         if (universeId) {
             const gameRes = await axios.get(
                 `https://games.roblox.com/v1/games?universeIds=${universeId}`,
                 { headers: robloxHeaders }
             );
-
-            if (gameRes.data.data.length > 0) {
+            if (gameRes.data.data && gameRes.data.data.length > 0) {
                 return gameRes.data.data[0].name;
             }
         }
 
-        const placeId = presence.rootPlaceId || presence.placeId;
-
+        // 2. Try Place API if universe fails
         if (placeId) {
-            const universeRes = await axios.get(
-                `https://apis.roblox.com/universes/v1/places/${placeId}/universe`,
+            const placeRes = await axios.get(
+                `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${placeId}`,
                 { headers: robloxHeaders }
             );
-
-            const universeIdFromPlace = universeRes.data.universeId;
-
-            if (universeIdFromPlace) {
-                const gameRes = await axios.get(
-                    `https://games.roblox.com/v1/games?universeIds=${universeIdFromPlace}`,
-                    { headers: robloxHeaders }
-                );
-
-                if (gameRes.data.data.length > 0) {
-                    return gameRes.data.data[0].name;
-                }
+            if (placeRes.data && placeRes.data.length > 0) {
+                return placeRes.data[0].name;
             }
         }
 
+        // 3. Fallback to lastLocation if provided by presence
+        if (presence.lastLocation && presence.lastLocation !== "" && presence.lastLocation !== "Website") {
+            return presence.lastLocation;
+        }
     } catch (e) {
         console.error("Game fetch error:", e.response?.data || e.message);
     }
@@ -160,18 +146,21 @@ setInterval(async () => {
             const curr = presence.userPresenceType;
             let embed = null;
 
-            if ((prev === 1 || prev === 0 || prev === null) && curr === 2) {
-                const gameName = await getGameName(presence);
-                const placeId = presence.rootPlaceId || presence.placeId;
+            // Define common game info variables
+            const placeId = presence.rootPlaceId || presence.placeId;
+            let gameName = "Unknown Game";
+            let gameLink = "Unavailable (Privacy Settings)";
 
-                let gameLink = placeId
-                    ? `https://www.roblox.com/games/${placeId}`
-                    : "Unavailable (Privacy Settings)";
-
-                if (placeId && presence.gameId) {
-                    gameLink = `https://www.roblox.com/games/${placeId}?jobId=${presence.gameId}`;
+            if (curr === 2) {
+                gameName = await getGameName(presence);
+                if (placeId) {
+                    gameLink = presence.gameId
+                        ? `https://www.roblox.com/games/${placeId}?jobId=${presence.gameId}`
+                        : `https://www.roblox.com/games/${placeId}`;
                 }
+            }
 
+            if ((prev === 1 || prev === 0 || prev === null) && curr === 2) {
                 embed = new EmbedBuilder()
                     .setTitle("🎮 Player Joined Game")
                     .setDescription(`**${data.username}** joined **${gameName}**`)
@@ -180,20 +169,7 @@ setInterval(async () => {
                     .setTimestamp();
             }
 
-            else if (prev === 2 && curr === 2 &&
-                (presence.rootPlaceId || presence.placeId) !== data.lastPlaceId) {
-
-                const gameName = await getGameName(presence);
-                const placeId = presence.rootPlaceId || presence.placeId;
-
-                let gameLink = placeId
-                    ? `https://www.roblox.com/games/${placeId}`
-                    : "Unavailable";
-
-                if (placeId && presence.gameId) {
-                    gameLink = `https://www.roblox.com/games/${placeId}?jobId=${presence.gameId}`;
-                }
-
+            else if (prev === 2 && curr === 2 && placeId !== data.lastPlaceId) {
                 embed = new EmbedBuilder()
                     .setTitle("🔄 Game Changed")
                     .setDescription(`**${data.username}** switched to **${gameName}**`)
@@ -223,14 +199,16 @@ setInterval(async () => {
                     try {
                         const channel = await client.channels.fetch(channelId);
                         if (channel) channel.send({ embeds: [embed] });
-                    } catch {}
+                    } catch (e) {
+                        console.error(`Failed to send to channel ${channelId}:`, e.message);
+                    }
                 }
             }
 
             trackedUsers.set(userId, {
                 ...data,
                 lastStatus: curr,
-                lastPlaceId: presence.rootPlaceId || presence.placeId || null
+                lastPlaceId: placeId || null
             });
 
             saveData();
