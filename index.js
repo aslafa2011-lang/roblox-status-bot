@@ -19,12 +19,17 @@ const fs = require('fs');
 
 const token = process.env.TOKEN;
 const clientId = process.env.CLIENT_ID;
-const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 
-// Roblox Auth Headers
+// ===== COOKIE SAFETY CHECK =====
+// Ensures the cookie works whether you pasted it with or without the prefix
+const rawCookie = process.env.ROBLOX_COOKIE || "";
+const formattedCookie = rawCookie.includes(".ROBLOSECURITY=") 
+    ? rawCookie 
+    : `.ROBLOSECURITY=${rawCookie}`;
+
 const robloxHeaders = {
     "Content-Type": "application/json",
-    "Cookie": `.ROBLOSECURITY=${ROBLOX_COOKIE}`
+    "Cookie": formattedCookie
 };
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -48,37 +53,44 @@ function saveData() {
 // ===== IMPROVED GAME NAME FUNCTION =====
 async function getGameName(presence) {
     try {
-        const universeId = presence.universeId;
+        let universeId = presence.universeId;
         const placeId = presence.rootPlaceId || presence.placeId;
 
-        // 1. Try Universe API first (most reliable for name)
+        // 1. If no universeId is provided natively, convert placeId -> universeId
+        if (!universeId && placeId) {
+            try {
+                const uniRes = await axios.get(
+                    `https://apis.roblox.com/universes/v1/places/${placeId}/universe`,
+                    { headers: robloxHeaders }
+                );
+                universeId = uniRes.data.universeId;
+            } catch (err) {
+                // Fails silently to allow fallback
+            }
+        }
+
+        // 2. Fetch game details using the universeId (Most reliable)
         if (universeId) {
-            const gameRes = await axios.get(
-                `https://games.roblox.com/v1/games?universeIds=${universeId}`,
-                { headers: robloxHeaders }
-            );
-            if (gameRes.data.data && gameRes.data.data.length > 0) {
-                return gameRes.data.data[0].name;
+            try {
+                const gameRes = await axios.get(
+                    `https://games.roblox.com/v1/games?universeIds=${universeId}`,
+                    { headers: robloxHeaders }
+                );
+                if (gameRes.data.data && gameRes.data.data.length > 0) {
+                    return gameRes.data.data[0].name;
+                }
+            } catch (err) {
+                // Fails silently to allow fallback
             }
         }
 
-        // 2. Try Place API if universe fails
-        if (placeId) {
-            const placeRes = await axios.get(
-                `https://games.roblox.com/v1/games/multiget-place-details?placeIds=${placeId}`,
-                { headers: robloxHeaders }
-            );
-            if (placeRes.data && placeRes.data.length > 0) {
-                return placeRes.data[0].name;
-            }
-        }
-
-        // 3. Fallback to lastLocation if provided by presence
-        if (presence.lastLocation && presence.lastLocation !== "" && presence.lastLocation !== "Website") {
+        // 3. Ultimate Fallback: The text Roblox generates itself
+        if (presence.lastLocation && presence.lastLocation.trim() !== "" && presence.lastLocation !== "Website") {
             return presence.lastLocation;
         }
+
     } catch (e) {
-        console.error("Game fetch error:", e.response?.data || e.message);
+        console.error("Game fetch error:", e.message);
     }
 
     return "Unknown Game";
@@ -318,3 +330,4 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.login(token);
+
