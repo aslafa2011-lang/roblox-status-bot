@@ -11,7 +11,10 @@ const {
     SlashCommandBuilder,
     REST,
     Routes,
-    EmbedBuilder
+    EmbedBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle
 } = require('discord.js');
 
 const axios = require('axios');
@@ -53,37 +56,28 @@ function saveData() {
 async function getGameName(presence) {
     const placeId = presence.rootPlaceId || presence.placeId;
 
-    // 1. The Economy API Bypass (Public, no cookie needed, very reliable)
     if (placeId) {
         try {
             const assetRes = await axios.get(`https://economy.roblox.com/v2/assets/${placeId}/details`);
             if (assetRes.data && assetRes.data.Name) {
                 return assetRes.data.Name;
             }
-        } catch (err) {
-            console.log(`[DEBUG] Economy API failed for PlaceId ${placeId}:`, err.message);
-        }
+        } catch {}
     }
 
-    // 2. Universe API Fallback (Public, no cookie needed)
     if (presence.universeId) {
         try {
             const gameRes = await axios.get(`https://games.roblox.com/v1/games?universeIds=${presence.universeId}`);
             if (gameRes.data.data && gameRes.data.data.length > 0) {
                 return gameRes.data.data[0].name;
             }
-        } catch (err) {
-            console.log(`[DEBUG] Universe API failed:`, err.message);
-        }
+        } catch {}
     }
 
-    // 3. Last Location Fallback
     if (presence.lastLocation && presence.lastLocation.trim() !== "" && presence.lastLocation !== "Website") {
         return presence.lastLocation;
     }
 
-    // 4. If all fails, log EXACTLY what Roblox gave us to the console so we know why
-    console.log(`[DEBUG] ALARM! Failed to get game name. Raw presence data from Roblox:`, JSON.stringify(presence, null, 2));
     return "Unknown Game";
 }
 
@@ -102,6 +96,213 @@ const commands = [
         .setDescription('List tracked users'),
     new SlashCommandBuilder()
         .setName('clear')
+        .setDescription('Remove ALL tracked users'),
+    new SlashCommandBuilder()
+        .setName('status')
+        .setDescription('Check Roblox player status')
+        .addStringOption(o => o.setName('username').setDescription('Roblox username').setRequired(true))
+].map(c => c.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(token);
+
+(async () => {
+    try {
+        await rest.put(Routes.applicationCommands(clientId), { body: commands });
+        console.log("Commands registered.");
+    } catch (e) {
+        console.error(e);
+    }
+})();
+
+// ===== TRACK LOOP =====
+setInterval(async () => {
+    for (const [userId, data] of trackedUsers.entries()) {
+        try {
+            const presenceRes = await axios.post(
+                'https://presence.roblox.com/v1/presence/users',
+                { userIds: [Number(userId)] },
+                { headers: robloxHeaders }
+            );
+
+            const presence = presenceRes.data.userPresences[0];
+            if (!presence) continue;
+
+            const prev = data.lastStatus;
+            const curr = presence.userPresenceType;
+            const placeId = presence.rootPlaceId || presence.placeId;
+
+            let embed = null;
+            let components = [];
+
+            if ((prev === 1 || prev === 0 || prev === null) && curr === 2) {
+
+                const gameName = await getGameName(presence);
+
+                embed = new EmbedBuilder()
+                    .setTitle("🎮 Player Joined Game")
+                    .setDescription(`**${data.username}** joined **${gameName}**`)
+                    .setColor(0x00ff00)
+                    .setTimestamp();
+
+                if (placeId) {
+                    const joinURL = presence.gameId
+                        ? `https://www.roblox.com/games/${placeId}?jobId=${presence.gameId}`
+                        : `https://www.roblox.com/games/${placeId}`;
+
+                    const joinButton = new ButtonBuilder()
+                        .setLabel("Join Game")
+                        .setStyle(ButtonStyle.Link)
+                        .setURL(joinURL);
+
+                    const row = new ActionRowBuilder().addComponents(joinButton);
+                    components = [row];
+                }
+            }
+
+            else if (prev === 2 && curr === 0) {
+                embed = new EmbedBuilder()
+                    .setTitle("🔴 Player Offline")
+                    .setDescription(`**${data.username}** went Offline`)
+                    .setColor(0xff0000)
+                    .setTimestamp();
+            }
+
+            else if ((prev === 0 || prev === null) && curr === 1) {
+                embed = new EmbedBuilder()
+                    .setTitle("🟢 Player Online")
+                    .setDescription(`**${data.username}** is now Online`)
+                    .setColor(0x0099ff)
+                    .setTimestamp();
+            }
+
+            if (embed) {
+                for (const channelId of data.channels) {
+                    try {
+                        const channel = await client.channels.fetch(channelId);
+                        if (channel) {
+                            channel.send({
+                                embeds: [embed],
+                                components: components
+                            });
+                        }
+                    } catch {}
+                }
+            }
+
+            trackedUsers.set(userId, {
+                ...data,
+                lastStatus: curr
+            });
+
+            saveData();
+
+        } catch (err) {
+            console.error("Tracking error:", err.message);
+        }
+    }
+}, 15000);
+
+// ===== Handle Commands =====
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+
+    try {
+
+        if (interaction.commandName === 'list') {
+            if (trackedUsers.size === 0)
+                return interaction.reply("No users are being tracked.");
+
+            const list = [...trackedUsers.values()]
+                .map(u => `• ${u.username}`)
+                .join("\n");
+
+            return interaction.reply(`📋 **Tracked Users:**\n${list}`);
+        }
+
+        if (interaction.commandName === 'clear') {
+            trackedUsers.clear();
+            saveData();
+            return interaction.reply("🗑️ All tracked users removed.");
+        }
+
+        const username = interaction.options.getString('username');
+
+        const userRes = await axios.post(
+            'https://users.roblox.com/v1/usernames/users',
+            { usernames: [username], excludeBannedUsers: true },
+            { headers: robloxHeaders }
+        );
+
+        if (!userRes.data.data.length)
+            return interaction.reply("User not found.");
+
+        const userId = userRes.data.data[0].id.toString();
+
+        if (interaction.commandName === 'track') {
+            if (!trackedUsers.has(userId)) {
+                trackedUsers.set(userId, {
+                    username,
+                    lastStatus: null,
+                    channels: [interaction.channelId]
+                });
+            }
+            saveData();
+            return interaction.reply(`✅ Now tracking **${username}**.`);
+        }
+
+        if (interaction.commandName === 'untrack') {
+            if (!trackedUsers.has(userId))
+                return interaction.reply("Not tracking that user.");
+
+            trackedUsers.delete(userId);
+            saveData();
+            return interaction.reply(`🛑 Stopped tracking **${username}**.`);
+        }
+
+        if (interaction.commandName === 'status') {
+
+            const presenceRes = await axios.post(
+                'https://presence.roblox.com/v1/presence/users',
+                { userIds: [Number(userId)] },
+                { headers: robloxHeaders }
+            );
+
+            const presence = presenceRes.data.userPresences[0];
+
+            let message = "🔴 Offline";
+            let link = "";
+
+            if (presence) {
+                const status = presence.userPresenceType;
+
+                if (status === 2) {
+                    const gameName = await getGameName(presence);
+                    const placeId = presence.rootPlaceId || presence.placeId;
+
+                    message = `🎮 In Game: **${gameName}**`;
+
+                    if (placeId) {
+                        const joinURL = presence.gameId
+                            ? `https://www.roblox.com/games/${placeId}?jobId=${presence.gameId}`
+                            : `https://www.roblox.com/games/${placeId}`;
+
+                        link = `\n🔗 **Join Server:** ${joinURL}`;
+                    }
+                }
+                else if (status === 3) message = "🛠️ In Studio";
+                else if (status === 1) message = "🟢 Online";
+            }
+
+            return interaction.reply(`${username} is currently: ${message}${link}`);
+        }
+
+    } catch (err) {
+        console.error(err);
+        interaction.reply("Error processing request.");
+    }
+});
+
+client.login(token);        .setName('clear')
         .setDescription('Remove ALL tracked users'),
     new SlashCommandBuilder()
         .setName('status')
